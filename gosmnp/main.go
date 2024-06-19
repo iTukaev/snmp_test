@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
@@ -17,6 +17,7 @@ func main() {
 	go func() { _ = http.ListenAndServe(":8080", nil) }()
 	now := time.Now()
 
+	var counter atomic.Uint64
 	master := GoSNMPServer.MasterAgent{
 		Logger: GoSNMPServer.NewDiscardLogger(),
 		SecurityConfig: GoSNMPServer.SecurityConfig{
@@ -38,6 +39,7 @@ func main() {
 						OID:  ".1.3.6.1.4.1.2021.11.60",
 						Type: gosnmp.TimeTicks,
 						OnGet: func() (value interface{}, err error) {
+							counter.Add(1)
 							return GoSNMPServer.Asn1TimeTicksWrap(123456788), nil
 						},
 						Document: "Uptime",
@@ -61,7 +63,17 @@ func main() {
 
 	fmt.Println(iter.next())
 	fmt.Println(time.Since(now))
-	<-context.Background().Done()
+
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C:
+			current := counter.Swap(0)
+			fmt.Println("next count:", current)
+		}
+	}
 }
 
 type ipIterator struct {
