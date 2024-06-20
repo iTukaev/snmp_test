@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 )
 
 var counter atomic.Uint64
+var ipCache = cache{
+	c: map[string]struct{}{},
+}
 
 func main() {
 	go func() { _ = http.ListenAndServe(":8080", nil) }()
@@ -53,8 +57,17 @@ func main() {
 }
 
 func handlePacket(packet gopacket.Packet) {
-	udp := packet.TransportLayer().(*layers.UDP)
 	ip4 := packet.NetworkLayer().(*layers.IPv4)
+
+	// Упрощённая версия проверки дублирования пакетов UDP. Конкретно у меня все пакеты UDP дублируются при текущих
+	// заданных параметрах. net.ListenUDP автоматически разрешает эту проблему на уровне ОС. pfring же принимает все
+	// пакеты как есть и поэтому дублируются вся обработка snmp.
+	if ipCache.pop(ip4.SrcIP.String()) {
+		return
+	}
+	ipCache.put(ip4.SrcIP.String())
+
+	udp := packet.TransportLayer().(*layers.UDP)
 	payload := packet.ApplicationLayer().Payload()
 
 	result, err := master.ResponseForBuffer(payload)
@@ -79,6 +92,30 @@ func handlePacket(packet gopacket.Packet) {
 			fmt.Println("Reply PDU meet err:", err)
 		}
 	}
+}
+
+type cache struct {
+	c  map[string]struct{}
+	mu sync.Mutex
+}
+
+func (c *cache) put(ip string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.c[ip] = struct{}{}
+}
+
+func (c *cache) pop(ip string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, ok := c.c[ip]; ok {
+		delete(c.c, ip)
+		return true
+	}
+
+	return false
 }
 
 type udpReplyer struct {
